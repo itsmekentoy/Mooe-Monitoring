@@ -311,7 +311,7 @@ const MOOEStatistics: React.FC<MOOEStatisticsProps> = ({ onSecretTap }) => {
                     tickFormatter={(v: number) => `₱${(v / 1000).toFixed(0)}k`}
                   />
                   <Tooltip
-                    formatter={(value: number) => peso(value)}
+                    formatter={(value) => peso(value as number)}
                     contentStyle={{
                       borderRadius: 8,
                       borderColor: "#e2e8f0",
@@ -345,7 +345,7 @@ const MOOEStatistics: React.FC<MOOEStatisticsProps> = ({ onSecretTap }) => {
                       <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                     ))}
                   </Pie>
-                  <Tooltip formatter={(value: number) => peso(value)} />
+                  <Tooltip formatter={(value) => peso(value as number)} />
                 </PieChart>
               </ResponsiveContainer>
             </div>
