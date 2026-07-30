@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Menu,
   X,
+  LogOut,
 } from "lucide-react";
 
 /**
@@ -35,6 +36,7 @@ interface BudgetEntry {
   toMonth: string;
   year: number;
   budget: number;
+  createdByName: string;
 }
 
 interface Category {
@@ -57,6 +59,7 @@ interface ExpenseRow {
   categoryId: string;
   liquidated: boolean;
   liquidatedAmount: string;
+  createdByName: string;
 }
 
 // ---------- Constants ----------
@@ -80,12 +83,28 @@ const newId = (): string =>
 
 // ---------- Placeholder panels ----------
 
+import { type AuthUser } from "../lib/auth";
+import { supabase } from "../lib/supabase";
+
 // ---------- Main component ----------
 
-const MOOEBudgetEntry: React.FC = () => {
+interface MOOEBudgetEntryProps {
+  user: AuthUser;
+  onLogout: () => void;
+}
+
+const MOOEBudgetEntry: React.FC<MOOEBudgetEntryProps> = ({ user, onLogout }) => {
   // Navigation
-  const [activeNav, setActiveNav] = useState<NavItem>("budget");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const NAV_KEY = "mooe_active_nav";
+
+  const [activeNav, setActiveNav] = useState<NavItem>(() => {
+    const saved = sessionStorage.getItem(NAV_KEY) as NavItem | null;
+    return saved ?? "budget";
+  });
+  const [settingsOpen, setSettingsOpen] = useState(() => {
+    const saved = sessionStorage.getItem("mooe_active_nav") as NavItem | null;
+    return saved === "categories" || saved === "user-management";
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Budget form state
@@ -105,8 +124,30 @@ const MOOEBudgetEntry: React.FC = () => {
 
   const selectedBudget = budgetList.find((b) => b.id === confirmedBudgetId) ?? null;
 
-  const handleSelectBudget = () => {
-    if (selectedBudgetId) setConfirmedBudgetId(selectedBudgetId);
+  // Compute allowed date range for expense date inputs
+  const expenseDateMin = useMemo(() => {
+    if (!selectedBudget) return undefined;
+    const monthIdx = MONTHS.indexOf(selectedBudget.fromMonth);
+    if (monthIdx === -1) return undefined;
+    const mm = String(monthIdx + 1).padStart(2, "0");
+    return `${selectedBudget.year}-${mm}-01`;
+  }, [selectedBudget]);
+
+  const expenseDateMax = useMemo(() => {
+    if (!selectedBudget) return undefined;
+    const monthIdx = MONTHS.indexOf(selectedBudget.toMonth);
+    if (monthIdx === -1) return undefined;
+    // Last day of the toMonth
+    const lastDay = new Date(selectedBudget.year, monthIdx + 1, 0).getDate();
+    const mm = String(monthIdx + 1).padStart(2, "0");
+    const dd = String(lastDay).padStart(2, "0");
+    return `${selectedBudget.year}-${mm}-${dd}`;
+  }, [selectedBudget]);
+
+  const handleSelectBudget = async () => {
+    if (!selectedBudgetId) return;
+    setConfirmedBudgetId(selectedBudgetId);
+    await fetchExpenses(selectedBudgetId);
   };
 
   const handleClearBudgetSelection = () => {
@@ -119,244 +160,42 @@ const MOOEBudgetEntry: React.FC = () => {
 
   // Expense table state
   const [expenses, setExpenses] = useState<ExpenseRow[]>([]);
+  const [expensesLoading, setExpensesLoading] = useState(false);
+  const [expensesSaving, setExpensesSaving] = useState(false);
   const [expensesSavedAt, setExpensesSavedAt] = useState<Date | null>(null);
   const [expenseError, setExpenseError] = useState<string>("");
 
-  // ---- Budget handlers ----
-
-  const handleSaveBudget = () => {
-    const parsed = parseFloat(budgetInput);
-    if (!budgetInput || isNaN(parsed) || parsed <= 0) {
-      setBudgetError("Enter a valid budget amount greater than 0.");
-      return;
-    }
-    const parsedYear = parseInt(yearInput, 10);
-    if (!yearInput || isNaN(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
-      setBudgetError("Enter a valid year (2000 – 2100).");
-      return;
-    }
-
-    if (editingBudgetId) {
-      setBudgetList((prev) =>
-        prev.map((b) =>
-          b.id === editingBudgetId
-            ? { ...b, fromMonth: monthInput, toMonth: toMonthInput, year: parsedYear, budget: parsed }
-            : b
-        )
-      );
-      setEditingBudgetId(null);
-    } else {
-      setBudgetList((prev) => [
-        ...prev,
-        { id: newId(), fromMonth: monthInput, toMonth: toMonthInput, year: parsedYear, budget: parsed },
-      ]);
-    }
-
-    setMonthInput(MONTHS[0]);
-    setToMonthInput(MONTHS[11]);
-    setYearInput(String(new Date().getFullYear()));
-    setBudgetInput("");
-    setBudgetError("");
-  };
-
-  const handleEditBudgetRow = (entry: BudgetEntry) => {
-    setMonthInput(entry.fromMonth);
-    setToMonthInput(entry.toMonth);
-    setYearInput(String(entry.year));
-    setBudgetInput(String(entry.budget));
-    setEditingBudgetId(entry.id);
-    setBudgetError("");
-  };
-
-  const handleDeleteBudgetRow = (id: string) => {
-    setBudgetList((prev) => prev.filter((b) => b.id !== id));
-    if (editingBudgetId === id) {
-      setEditingBudgetId(null);
-      setMonthInput(MONTHS[0]);
-      setToMonthInput(MONTHS[11]);
-      setBudgetInput("");
-    }
-  };
-
-  const handleCancelEdit = () => {
-    setEditingBudgetId(null);
-    setMonthInput(MONTHS[0]);
-    setToMonthInput(MONTHS[11]);
-    setYearInput(String(new Date().getFullYear()));
-    setBudgetInput("");
-    setBudgetError("");
-  };
-
-  // Categories
-  const [categoryList, setCategoryList] = useState<Category[]>([]);
-  const [catNameInput, setCatNameInput] = useState("");
-  const [catDescInput, setCatDescInput] = useState("");
-  const [catError, setCatError] = useState("");
-  const [editingCatId, setEditingCatId] = useState<string | null>(null);
-
-  const handleSaveCategory = () => {
-    if (!catNameInput.trim()) {
-      setCatError("Category name is required.");
-      return;
-    }
-    const duplicate = categoryList.some(
-      (c) => c.name.toLowerCase() === catNameInput.trim().toLowerCase() && c.id !== editingCatId
-    );
-    if (duplicate) {
-      setCatError("A category with this name already exists.");
-      return;
-    }
-
-    if (editingCatId) {
-      setCategoryList((prev) =>
-        prev.map((c) =>
-          c.id === editingCatId
-            ? { ...c, name: catNameInput.trim(), description: catDescInput.trim() }
-            : c
-        )
-      );
-      setEditingCatId(null);
-    } else {
-      setCategoryList((prev) => [
-        ...prev,
-        { id: newId(), name: catNameInput.trim(), description: catDescInput.trim() },
-      ]);
-    }
-
-    setCatNameInput("");
-    setCatDescInput("");
-    setCatError("");
-  };
-
-  const handleEditCategory = (cat: Category) => {
-    setCatNameInput(cat.name);
-    setCatDescInput(cat.description);
-    setEditingCatId(cat.id);
-    setCatError("");
-  };
-
-  const handleDeleteCategory = (id: string) => {
-    setCategoryList((prev) => prev.filter((c) => c.id !== id));
-    // Clear category from any expense rows that used it
-    setExpenses((prev) => prev.map((r) => r.categoryId === id ? { ...r, categoryId: "" } : r));
-    if (editingCatId === id) {
-      setEditingCatId(null);
-      setCatNameInput("");
-      setCatDescInput("");
-    }
-  };
-
-  const handleCancelCatEdit = () => {
-    setEditingCatId(null);
-    setCatNameInput("");
-    setCatDescInput("");
-    setCatError("");
-  };
-
-  // ---- User Management state & handlers ----
-
-  const [userList, setUserList] = useState<UserAccount[]>([]);
-  const [userNameInput, setUserNameInput] = useState("");
-  const [userEmailInput, setUserEmailInput] = useState("");
-  const [userPasswordInput, setUserPasswordInput] = useState("");
-  const [showUserPassword, setShowUserPassword] = useState(false);
-  const [userError, setUserError] = useState("");
-  const [editingUserId, setEditingUserId] = useState<string | null>(null);
-
-  const handleSaveUser = () => {
-    if (!userNameInput.trim()) {
-      setUserError("Name is required.");
-      return;
-    }
-    if (!userEmailInput.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmailInput)) {
-      setUserError("Enter a valid email address.");
-      return;
-    }
-    if (!editingUserId && !userPasswordInput) {
-      setUserError("Password is required.");
-      return;
-    }
-    if (userPasswordInput && userPasswordInput.length < 6) {
-      setUserError("Password must be at least 6 characters.");
-      return;
-    }
-    const duplicate = userList.some(
-      (u) => u.email.toLowerCase() === userEmailInput.trim().toLowerCase() && u.id !== editingUserId
-    );
-    if (duplicate) {
-      setUserError("A user with this email already exists.");
-      return;
-    }
-
-    if (editingUserId) {
-      setUserList((prev) =>
-        prev.map((u) =>
-          u.id === editingUserId
-            ? {
-                ...u,
-                name: userNameInput.trim(),
-                email: userEmailInput.trim(),
-                // only update password if a new one was typed
-                ...(userPasswordInput ? { password: userPasswordInput } : {}),
-              }
-            : u
-        )
-      );
-      setEditingUserId(null);
-    } else {
-      setUserList((prev) => [
-        ...prev,
-        {
-          id: newId(),
-          name: userNameInput.trim(),
-          email: userEmailInput.trim(),
-          password: userPasswordInput,
-        },
-      ]);
-    }
-
-    setUserNameInput("");
-    setUserEmailInput("");
-    setUserPasswordInput("");
-    setUserError("");
-    setShowUserPassword(false);
-  };
-
-  const handleEditUser = (user: UserAccount) => {
-    setUserNameInput(user.name);
-    setUserEmailInput(user.email);
-    setUserPasswordInput(""); // don't pre-fill password
-    setEditingUserId(user.id);
-    setUserError("");
-    setShowUserPassword(false);
-  };
-
-  const handleDeleteUser = (id: string) => {
-    setUserList((prev) => prev.filter((u) => u.id !== id));
-    if (editingUserId === id) {
-      setEditingUserId(null);
-      setUserNameInput("");
-      setUserEmailInput("");
-      setUserPasswordInput("");
-      setUserError("");
-    }
-  };
-
-  const handleCancelUserEdit = () => {
-    setEditingUserId(null);
-    setUserNameInput("");
-    setUserEmailInput("");
-    setUserPasswordInput("");
-    setUserError("");
-    setShowUserPassword(false);
-  };
-
   // ---- Expense handlers ----
 
+  const fetchExpenses = async (budgetId: string) => {
+    setExpensesLoading(true);
+    const { data, error } = await supabase
+      .from("expenses")
+      .select("id, expense_date, amount, category_id, liquidated, liquidated_amount, created_by:users!expenses_created_by_fkey(name)")
+      .eq("budget_entry_id", budgetId)
+      .order("expense_date", { ascending: true });
+
+    if (!error && data) {
+      setExpenses(
+        data.map((r) => ({
+          id: r.id,
+          date: r.expense_date,
+          amount: String(r.amount),
+          categoryId: r.category_id ?? "",
+          liquidated: r.liquidated,
+          liquidatedAmount: r.liquidated_amount != null ? String(r.liquidated_amount) : "",
+          createdByName: (r.created_by as { name: string } | null)?.name ?? "—",
+        }))
+      );
+    }
+    setExpensesLoading(false);
+  };
+
   const addExpenseRow = () => {
+    // Rows added locally; saved to DB on "Save Expenses"
     setExpenses((rows) => [
       ...rows,
-      { id: newId(), date: "", amount: "", categoryId: "", liquidated: false, liquidatedAmount: "" },
+      { id: `new-${newId()}`, date: "", amount: "", categoryId: "", liquidated: false, liquidatedAmount: "", createdByName: user.name },
     ]);
     setExpensesSavedAt(null);
   };
@@ -383,12 +222,17 @@ const MOOEBudgetEntry: React.FC = () => {
     setExpensesSavedAt(null);
   };
 
-  const removeExpenseRow = (id: string) => {
+  const removeExpenseRow = async (id: string) => {
+    // If it's a persisted row (real UUID), delete from DB
+    if (!id.startsWith("new-")) {
+      const { error } = await supabase.from("expenses").delete().eq("id", id);
+      if (error) { setExpenseError("Failed to delete row: " + error.message); return; }
+    }
     setExpenses((rows) => rows.filter((row) => row.id !== id));
     setExpensesSavedAt(null);
   };
 
-  const handleSaveExpenses = () => {
+  const handleSaveExpenses = async () => {
     if (expenses.length === 0) {
       setExpenseError("Add at least one expense entry before saving.");
       return;
@@ -401,8 +245,379 @@ const MOOEBudgetEntry: React.FC = () => {
       setExpenseError("Every row needs a valid date and an amount greater than 0.");
       return;
     }
+
+    setExpensesSaving(true);
     setExpenseError("");
-    setExpensesSavedAt(new Date());
+
+    try {
+      for (const row of expenses) {
+        const payload = {
+          budget_entry_id: confirmedBudgetId!,
+          expense_date: row.date,
+          amount: parseFloat(row.amount),
+          category_id: row.categoryId || null,
+          liquidated: row.liquidated,
+          liquidated_amount: row.liquidated && row.liquidatedAmount
+            ? parseFloat(row.liquidatedAmount)
+            : null,
+          created_by: user.id,
+        };
+
+        if (row.id.startsWith("new-")) {
+          // Insert new row
+          const { data, error } = await supabase
+            .from("expenses")
+            .insert(payload)
+            .select("id")
+            .single();
+          if (error) throw new Error(error.message);
+          // Replace temp id with real DB id
+          setExpenses((prev) =>
+            prev.map((r) => r.id === row.id ? { ...r, id: data.id } : r)
+          );
+        } else {
+          // Update existing row
+          const { error } = await supabase
+            .from("expenses")
+            .update(payload)
+            .eq("id", row.id);
+          if (error) throw new Error(error.message);
+        }
+      }
+
+      setExpensesSavedAt(new Date());
+    } catch (err) {
+      setExpenseError(err instanceof Error ? err.message : "Failed to save expenses.");
+    } finally {
+      setExpensesSaving(false);
+    }
+  };
+
+
+  const [budgetListLoading, setBudgetListLoading] = useState(false);
+  const [budgetSaving, setBudgetSaving] = useState(false);
+
+  const fetchBudgets = async () => {
+    setBudgetListLoading(true);
+    const { data, error } = await supabase
+      .from("budget_entries")
+      .select("id, from_month, to_month, year, budget, created_by:users!budget_entries_created_by_fkey(name)")
+      .order("year", { ascending: true })
+      .order("from_month", { ascending: true });
+    if (!error && data) {
+      setBudgetList(
+        data.map((r) => ({
+          id: r.id,
+          fromMonth: r.from_month,
+          toMonth: r.to_month,
+          year: r.year,
+          budget: r.budget,
+          createdByName: (r.created_by as { name: string } | null)?.name ?? "—",
+        }))
+      );
+    }
+    setBudgetListLoading(false);
+  };
+
+  React.useEffect(() => {
+    if (activeNav === "budget") fetchBudgets();
+    // Also load budgets when switching to expenses tab so the dropdown is populated
+    if (activeNav === "expenses") fetchBudgets();
+  }, [activeNav]);
+
+  const handleSaveBudget = async () => {
+    const parsed = parseFloat(budgetInput);
+    if (!budgetInput || isNaN(parsed) || parsed <= 0) {
+      setBudgetError("Enter a valid budget amount greater than 0.");
+      return;
+    }
+    const parsedYear = parseInt(yearInput, 10);
+    if (!yearInput || isNaN(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
+      setBudgetError("Enter a valid year (2000 – 2100).");
+      return;
+    }
+
+    setBudgetSaving(true);
+    setBudgetError("");
+
+    try {
+      if (editingBudgetId) {
+        const { error } = await supabase
+          .from("budget_entries")
+          .update({
+            from_month: monthInput,
+            to_month: toMonthInput,
+            year: parsedYear,
+            budget: parsed,
+          })
+          .eq("id", editingBudgetId);
+        if (error) throw new Error(error.message);
+        setEditingBudgetId(null);
+      } else {
+        const { error } = await supabase.from("budget_entries").insert({
+          from_month: monthInput,
+          to_month: toMonthInput,
+          year: parsedYear,
+          budget: parsed,
+          created_by: user.id,
+        });
+        if (error) throw new Error(error.message);
+      }
+
+      setMonthInput(MONTHS[0]);
+      setToMonthInput(MONTHS[11]);
+      setYearInput(String(new Date().getFullYear()));
+      setBudgetInput("");
+      await fetchBudgets();
+    } catch (err) {
+      setBudgetError(err instanceof Error ? err.message : "Failed to save budget.");
+    } finally {
+      setBudgetSaving(false);
+    }
+  };
+
+  const handleEditBudgetRow = (entry: BudgetEntry) => {
+    setMonthInput(entry.fromMonth);
+    setToMonthInput(entry.toMonth);
+    setYearInput(String(entry.year));
+    setBudgetInput(String(entry.budget));
+    setEditingBudgetId(entry.id);
+    setBudgetError("");
+  };
+
+  const handleDeleteBudgetRow = async (id: string) => {
+    const { error } = await supabase.from("budget_entries").delete().eq("id", id);
+    if (error) { setBudgetError("Failed to delete: " + error.message); return; }
+    if (editingBudgetId === id) {
+      setEditingBudgetId(null);
+      setMonthInput(MONTHS[0]);
+      setToMonthInput(MONTHS[11]);
+      setBudgetInput("");
+    }
+    await fetchBudgets();
+  };
+
+  const handleCancelEdit = () => {
+    setEditingBudgetId(null);
+    setMonthInput(MONTHS[0]);
+    setToMonthInput(MONTHS[11]);
+    setYearInput(String(new Date().getFullYear()));
+    setBudgetInput("");
+    setBudgetError("");
+  };
+
+  // Categories
+  const [categoryList, setCategoryList] = useState<Category[]>([]);
+  const [catListLoading, setCatListLoading] = useState(false);
+  const [catSaving, setCatSaving] = useState(false);
+  const [catNameInput, setCatNameInput] = useState("");
+  const [catDescInput, setCatDescInput] = useState("");
+  const [catError, setCatError] = useState("");
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+
+  const fetchCategories = async () => {
+    setCatListLoading(true);
+    const { data, error } = await supabase
+      .from("expense_categories")
+      .select("id, name, description")
+      .order("name", { ascending: true });
+    if (!error && data) setCategoryList(data as Category[]);
+    setCatListLoading(false);
+  };
+
+  React.useEffect(() => {
+    if (activeNav === "categories") fetchCategories();
+    // Also fetch categories when expenses tab is active (needed for dropdown)
+    if (activeNav === "expenses") fetchCategories();
+  }, [activeNav]);
+
+  const handleSaveCategory = async () => {
+    if (!catNameInput.trim()) {
+      setCatError("Category name is required.");
+      return;
+    }
+
+    setCatSaving(true);
+    setCatError("");
+
+    try {
+      if (editingCatId) {
+        const { error } = await supabase
+          .from("expense_categories")
+          .update({ name: catNameInput.trim(), description: catDescInput.trim() })
+          .eq("id", editingCatId);
+        if (error) {
+          if (error.code === "23505") throw new Error("A category with this name already exists.");
+          throw new Error(error.message);
+        }
+        setEditingCatId(null);
+      } else {
+        const { error } = await supabase
+          .from("expense_categories")
+          .insert({ name: catNameInput.trim(), description: catDescInput.trim() });
+        if (error) {
+          if (error.code === "23505") throw new Error("A category with this name already exists.");
+          throw new Error(error.message);
+        }
+      }
+
+      setCatNameInput("");
+      setCatDescInput("");
+      await fetchCategories();
+    } catch (err) {
+      setCatError(err instanceof Error ? err.message : "Failed to save category.");
+    } finally {
+      setCatSaving(false);
+    }
+  };
+
+  const handleEditCategory = (cat: Category) => {
+    setCatNameInput(cat.name);
+    setCatDescInput(cat.description);
+    setEditingCatId(cat.id);
+    setCatError("");
+  };
+
+  const handleDeleteCategory = async (id: string) => {
+    const { error } = await supabase.from("expense_categories").delete().eq("id", id);
+    if (error) { setCatError("Failed to delete: " + error.message); return; }
+    // Clear from any expense rows using it
+    setExpenses((prev) => prev.map((r) => r.categoryId === id ? { ...r, categoryId: "" } : r));
+    if (editingCatId === id) {
+      setEditingCatId(null);
+      setCatNameInput("");
+      setCatDescInput("");
+    }
+    await fetchCategories();
+  };
+
+  const handleCancelCatEdit = () => {
+    setEditingCatId(null);
+    setCatNameInput("");
+    setCatDescInput("");
+    setCatError("");
+  };
+
+  // ---- User Management state & handlers ----
+
+  const [userList, setUserList] = useState<UserAccount[]>([]);
+  const [userListLoading, setUserListLoading] = useState(false);
+  const [userNameInput, setUserNameInput] = useState("");
+  const [userEmailInput, setUserEmailInput] = useState("");
+  const [userPasswordInput, setUserPasswordInput] = useState("");
+  const [showUserPassword, setShowUserPassword] = useState(false);
+  const [userError, setUserError] = useState("");
+  const [userSaving, setUserSaving] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+
+  // Fetch all users from Supabase
+  const fetchUsers = async () => {
+    setUserListLoading(true);
+    const { data, error } = await supabase
+      .from("users")
+      .select("id, name, email, password")
+      .order("created_at", { ascending: true });
+    if (!error && data) setUserList(data as UserAccount[]);
+    setUserListLoading(false);
+  };
+
+  // Load users when the user-management tab becomes active
+  React.useEffect(() => {
+    if (activeNav === "user-management") fetchUsers();
+  }, [activeNav]);
+
+  const handleSaveUser = async () => {
+    if (!userNameInput.trim()) { setUserError("Name is required."); return; }
+    if (!userEmailInput.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmailInput)) {
+      setUserError("Enter a valid email address."); return;
+    }
+    if (!editingUserId && !userPasswordInput) { setUserError("Password is required."); return; }
+    if (userPasswordInput && userPasswordInput.length < 6) {
+      setUserError("Password must be at least 6 characters."); return;
+    }
+
+    setUserSaving(true);
+    setUserError("");
+
+    try {
+      if (editingUserId) {
+        // Build update payload — only hash & update password if a new one was typed
+        const updates: Record<string, string> = {
+          name: userNameInput.trim(),
+          email: userEmailInput.trim().toLowerCase(),
+        };
+        if (userPasswordInput) {
+          const bcrypt = await import("bcryptjs");
+          updates.password = await bcrypt.hash(userPasswordInput, 12);
+        }
+
+        const { error } = await supabase
+          .from("users")
+          .update(updates)
+          .eq("id", editingUserId);
+
+        if (error) throw new Error(error.message);
+        setEditingUserId(null);
+      } else {
+        // Hash password before inserting
+        const bcrypt = await import("bcryptjs");
+        const hashed = await bcrypt.hash(userPasswordInput, 12);
+
+        const { error } = await supabase.from("users").insert({
+          name: userNameInput.trim(),
+          email: userEmailInput.trim().toLowerCase(),
+          password: hashed,
+        });
+
+        if (error) {
+          if (error.message.includes("unique") || error.code === "23505") {
+            throw new Error("A user with this email already exists.");
+          }
+          throw new Error(error.message);
+        }
+      }
+
+      setUserNameInput("");
+      setUserEmailInput("");
+      setUserPasswordInput("");
+      setShowUserPassword(false);
+      await fetchUsers();
+    } catch (err) {
+      setUserError(err instanceof Error ? err.message : "Failed to save user.");
+    } finally {
+      setUserSaving(false);
+    }
+  };
+
+  const handleEditUser = (u: UserAccount) => {
+    setUserNameInput(u.name);
+    setUserEmailInput(u.email);
+    setUserPasswordInput("");
+    setEditingUserId(u.id);
+    setUserError("");
+    setShowUserPassword(false);
+  };
+
+  const handleDeleteUser = async (id: string) => {
+    const { error } = await supabase.from("users").delete().eq("id", id);
+    if (error) { setUserError("Failed to delete user: " + error.message); return; }
+    if (editingUserId === id) {
+      setEditingUserId(null);
+      setUserNameInput("");
+      setUserEmailInput("");
+      setUserPasswordInput("");
+      setUserError("");
+    }
+    await fetchUsers();
+  };
+
+  const handleCancelUserEdit = () => {
+    setEditingUserId(null);
+    setUserNameInput("");
+    setUserEmailInput("");
+    setUserPasswordInput("");
+    setUserError("");
+    setShowUserPassword(false);
   };
 
   // ---- Derived totals ----
@@ -423,6 +638,7 @@ const MOOEBudgetEntry: React.FC = () => {
 
   const navigate = (item: NavItem) => {
     setActiveNav(item);
+    sessionStorage.setItem(NAV_KEY, item);
     setSidebarOpen(false);
     if (item === "categories" || item === "user-management") {
       setSettingsOpen(true);
@@ -577,10 +793,23 @@ const MOOEBudgetEntry: React.FC = () => {
             <button
               type="button"
               onClick={handleSaveBudget}
-              className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800"
+              disabled={budgetSaving}
+              className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <Save className="h-4 w-4" />
-              {editingBudgetId ? "Update" : "Save"}
+              {budgetSaving ? (
+                <>
+                  <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                  Saving…
+                </>
+              ) : (
+                <>
+                  <Save className="h-4 w-4" />
+                  {editingBudgetId ? "Update" : "Save"}
+                </>
+              )}
             </button>
             {editingBudgetId && (
               <button
@@ -606,7 +835,15 @@ const MOOEBudgetEntry: React.FC = () => {
       <div className="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
         <h2 className="mb-4 text-sm font-semibold text-slate-900">List of Budgets</h2>
 
-        {budgetList.length === 0 ? (
+        {budgetListLoading ? (
+          <div className="flex items-center justify-center py-10 text-slate-400">
+            <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+            </svg>
+            Loading budgets…
+          </div>
+        ) : budgetList.length === 0 ? (
           <div className="rounded-md border border-dashed border-slate-300 py-10 text-center">
             <p className="text-sm text-slate-500">
               No budget entries yet. Add one above.
@@ -622,6 +859,7 @@ const MOOEBudgetEntry: React.FC = () => {
                   <th className="pb-2 pr-4 font-semibold">To</th>
                   <th className="pb-2 pr-4 font-semibold">Year</th>
                   <th className="pb-2 pr-4 font-semibold">Budget</th>
+                  <th className="pb-2 pr-4 font-semibold">Created By</th>
                   <th className="pb-2 font-semibold text-right">Actions</th>
                 </tr>
               </thead>
@@ -638,6 +876,7 @@ const MOOEBudgetEntry: React.FC = () => {
                     <td className="py-2.5 pr-4 font-mono tabular-nums text-slate-900">
                       {peso(entry.budget)}
                     </td>
+                    <td className="py-2.5 pr-4 text-slate-500">{entry.createdByName}</td>
                     <td className="py-2.5 text-right">
                       <div className="flex items-center justify-end gap-1">
                         {editingBudgetId === entry.id ? (
@@ -671,7 +910,7 @@ const MOOEBudgetEntry: React.FC = () => {
               {/* Total row */}
               <tfoot>
                 <tr className="border-t border-slate-200">
-                  <td colSpan={4} className="pt-3 pr-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  <td colSpan={5} className="pt-3 pr-4 text-xs font-semibold uppercase tracking-wide text-slate-500">
                     Total
                   </td>
                   <td className="pt-3 pr-4 font-mono font-semibold tabular-nums text-slate-900">
@@ -789,7 +1028,15 @@ const MOOEBudgetEntry: React.FC = () => {
             </button>
           </div>
 
-          {expenses.length === 0 ? (
+          {expensesLoading ? (
+            <div className="flex items-center justify-center py-10 text-slate-400">
+              <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              Loading expenses…
+            </div>
+          ) : expenses.length === 0 ? (
             <div className="rounded-md border border-dashed border-slate-300 py-10 text-center">
               <p className="text-sm text-slate-500">
                 No expenses yet. Click "Add Expense" to log one.
@@ -804,6 +1051,7 @@ const MOOEBudgetEntry: React.FC = () => {
                     <th className="pb-2 pr-4 font-semibold">Category</th>
                     <th className="pb-2 pr-4 font-semibold">Amount</th>
                     <th className="pb-2 pr-4 font-semibold">Liquidated</th>
+                    <th className="pb-2 pr-4 font-semibold">Created By</th>
                     <th className="w-10 pb-2 font-semibold" />
                   </tr>
                 </thead>
@@ -814,6 +1062,8 @@ const MOOEBudgetEntry: React.FC = () => {
                         <input
                           type="date"
                           value={row.date}
+                          min={expenseDateMin}
+                          max={expenseDateMax}
                           onChange={(e) => updateExpenseRow(row.id, "date", e.target.value)}
                           className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:border-teal-600 focus:outline-none focus:ring-1 focus:ring-teal-600"
                         />
@@ -929,10 +1179,23 @@ const MOOEBudgetEntry: React.FC = () => {
               <button
                 type="button"
                 onClick={handleSaveExpenses}
-                className="flex items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800"
+                disabled={expensesSaving}
+                className="flex items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <Save className="h-4 w-4" />
-                Save Expenses
+                {expensesSaving ? (
+                  <>
+                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-4 w-4" />
+                    Save Expenses
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -983,13 +1246,29 @@ const MOOEBudgetEntry: React.FC = () => {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <div>
+          <div className="flex-1">
             <p className="text-xs font-semibold uppercase tracking-widest text-teal-700">
               MOOE Expenses Monitoring System
             </p>
             <h1 className="font-mono text-xl font-semibold text-slate-900">
               {pageTitle[activeNav]}
             </h1>
+          </div>
+          {/* User info + logout */}
+          <div className="flex items-center gap-3">
+            <div className="hidden text-right sm:block">
+              <p className="text-sm font-medium text-slate-900">{user.name}</p>
+              <p className="text-xs text-slate-500">{user.email}</p>
+            </div>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="flex items-center gap-1.5 rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-rose-600"
+              aria-label="Log out"
+            >
+              <LogOut className="h-4 w-4" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
           </div>
         </header>
 
@@ -1040,10 +1319,23 @@ const MOOEBudgetEntry: React.FC = () => {
                       <button
                         type="button"
                         onClick={handleSaveCategory}
-                        className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800"
+                        disabled={catSaving}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        <Save className="h-4 w-4" />
-                        {editingCatId ? "Update" : "Save"}
+                        {catSaving ? (
+                          <>
+                            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                            </svg>
+                            Saving…
+                          </>
+                        ) : (
+                          <>
+                            <Save className="h-4 w-4" />
+                            {editingCatId ? "Update" : "Save"}
+                          </>
+                        )}
                       </button>
                       {editingCatId && (
                         <button
@@ -1076,7 +1368,15 @@ const MOOEBudgetEntry: React.FC = () => {
                     )}
                   </h2>
 
-                  {categoryList.length === 0 ? (
+                  {catListLoading ? (
+                    <div className="flex items-center justify-center py-10 text-slate-400">
+                      <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                      Loading categories…
+                    </div>
+                  ) : categoryList.length === 0 ? (
                     <div className="rounded-md border border-dashed border-slate-300 py-10 text-center">
                       <Tag className="mx-auto mb-2 h-6 w-6 text-slate-300" />
                       <p className="text-sm text-slate-500">
@@ -1214,10 +1514,23 @@ const MOOEBudgetEntry: React.FC = () => {
                       <button
                         type="button"
                         onClick={handleSaveUser}
-                        className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800"
+                        disabled={userSaving}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-md bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        <Save className="h-4 w-4" />
-                        {editingUserId ? "Update" : "Save"}
+                        {userSaving ? (
+                          <>
+                            <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                            </svg>
+                            Saving…
+                          </>
+                        ) : (
+                          <>
+                            <Save className="h-4 w-4" />
+                            {editingUserId ? "Update" : "Save"}
+                          </>
+                        )}
                       </button>
                       {editingUserId && (
                         <button
@@ -1250,14 +1563,22 @@ const MOOEBudgetEntry: React.FC = () => {
                     )}
                   </h2>
 
-                  {userList.length === 0 ? (
+                  {userListLoading ? (
+                    <div className="flex items-center justify-center py-10 text-slate-400">
+                      <svg className="mr-2 h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                      </svg>
+                      Loading users…
+                    </div>
+                  ) : userList.length === 0 ? (
                     <div className="rounded-md border border-dashed border-slate-300 py-10 text-center">
                       <Users className="mx-auto mb-2 h-6 w-6 text-slate-300" />
                       <p className="text-sm text-slate-500">No users yet. Add one above.</p>
                     </div>
                   ) : (
                     <div className="overflow-x-auto">
-                      <table className="w-full min-w-[520px] text-left text-sm">
+                      <table className="w-full min-w-[480px] text-left text-sm">
                         <thead>
                           <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
                             <th className="pb-2 pr-4 font-semibold">#</th>
@@ -1268,20 +1589,20 @@ const MOOEBudgetEntry: React.FC = () => {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {userList.map((user, index) => (
+                          {userList.map((u, index) => (
                             <tr
-                              key={user.id}
-                              className={editingUserId === user.id ? "bg-teal-50" : ""}
+                              key={u.id}
+                              className={editingUserId === u.id ? "bg-teal-50" : ""}
                             >
                               <td className="py-2.5 pr-4 text-slate-400">{index + 1}</td>
-                              <td className="py-2.5 pr-4 font-medium text-slate-900">{user.name}</td>
-                              <td className="py-2.5 pr-4 text-slate-600">{user.email}</td>
+                              <td className="py-2.5 pr-4 font-medium text-slate-900">{u.name}</td>
+                              <td className="py-2.5 pr-4 text-slate-600">{u.email}</td>
                               <td className="py-2.5 pr-4 font-mono text-slate-400 tracking-widest text-xs">
-                                {"•".repeat(Math.min(user.password.length, 12))}
+                                {"•".repeat(12)}
                               </td>
                               <td className="py-2.5 text-right">
                                 <div className="flex items-center justify-end gap-1">
-                                  {editingUserId === user.id ? (
+                                  {editingUserId === u.id ? (
                                     <span className="flex items-center gap-1 text-xs font-medium text-teal-700">
                                       <CheckCircle2 className="h-3.5 w-3.5" />
                                       Editing
@@ -1289,7 +1610,7 @@ const MOOEBudgetEntry: React.FC = () => {
                                   ) : (
                                     <button
                                       type="button"
-                                      onClick={() => handleEditUser(user)}
+                                      onClick={() => handleEditUser(u)}
                                       aria-label="Edit user"
                                       className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                                     >
@@ -1298,7 +1619,7 @@ const MOOEBudgetEntry: React.FC = () => {
                                   )}
                                   <button
                                     type="button"
-                                    onClick={() => handleDeleteUser(user.id)}
+                                    onClick={() => handleDeleteUser(u.id)}
                                     aria-label="Delete user"
                                     className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-600"
                                   >
