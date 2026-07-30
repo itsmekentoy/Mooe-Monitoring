@@ -226,7 +226,7 @@ const MOOEStatistics: React.FC<MOOEStatisticsProps> = ({ onSecretTap }) => {
           data.map((r) => ({
             amount: Number(r.amount),
             expenseDate: r.expense_date,
-            categoryName: (r.expense_categories as { name: string } | null)?.name ?? null,
+            categoryName: (r.expense_categories as unknown as { name: string } | null)?.name ?? null,
           }))
         );
       }

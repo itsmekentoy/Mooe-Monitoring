@@ -184,7 +184,7 @@ const MOOEBudgetEntry: React.FC<MOOEBudgetEntryProps> = ({ user, onLogout }) => 
           categoryId: r.category_id ?? "",
           liquidated: r.liquidated,
           liquidatedAmount: r.liquidated_amount != null ? String(r.liquidated_amount) : "",
-          createdByName: (r.created_by as { name: string } | null)?.name ?? "—",
+          createdByName: (r.created_by as unknown as { name: string } | null)?.name ?? "—",
         }))
       );
     }
@@ -312,7 +312,7 @@ const MOOEBudgetEntry: React.FC<MOOEBudgetEntryProps> = ({ user, onLogout }) => 
           toMonth: r.to_month,
           year: r.year,
           budget: r.budget,
-          createdByName: (r.created_by as { name: string } | null)?.name ?? "—",
+          createdByName: (r.created_by as unknown as { name: string } | null)?.name ?? "—",
         }))
       );
     }
